@@ -1,9 +1,6 @@
 """
 Notes:
     - All plot / smoothing parameters are defined in the PARAMETERS section below
-      (edit those constants directly if you want to change behavior).
-    - The script intentionally avoids optional command-line parameters: you pass only the files
-      as arguments.
 """
 
 import sys
