@@ -12,4 +12,6 @@ python -m venv venv-plot
 
 source venv-plot/bin/activate
 
-python plotting.py "file1.csv" "file2.csv"
+python -m pip install -r requirements.txt
+
+python plotting.py file1.csv file2.csv file3.csv ...
