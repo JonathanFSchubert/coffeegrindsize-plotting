@@ -11,20 +11,29 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+try:
+    from KDEpy import FFTKDE
+except Exception:
+    FFTKDE = None
+
 
 # ----------------------------
-# PARAMETERS (edit here)
+# PARAMETERS
 # ----------------------------
-OUTPUT_KDE_PNG = "particle_distributions.png"
-OUTPUT_TILE_PNG = "D10_tile_fraction.png"
+OUTPUT_PNG = "plot.png"
 
 # KDE parameters (these operate in log10(mm) space)
-DEFAULT_BANDWIDTH = 0.035   # None -> Silverman rule-of-thumb will be used; otherwise use a number between 0 and 1
+
+# "ISJ": use KDEpy's Improved Sheather-Jones (solve-the-equation style) selector
+# None: Silverman rule-of-thumb
+# otherwise use a number between 0 and 1 (try for example 0.035)
+# i recommend using "ISJ" for acuracy with a big sample size. for smaller sample sizes it might be more helpful to use None (easier to see general trends)
+DEFAULT_BANDWIDTH = "ISJ"
+
 GRID_POINTS = 800          # number of x points to evaluate KDE
 
 # Plot appearance
 FIGSIZE_KDE = (11, 6)
-FIGSIZE_TILE = (6.5, 5)
 COLOR_CYCLE = None  # None -> use matplotlib default cycle
 
 # Memory safety: internal chunking for KDE computation (set None to auto-choose)
@@ -66,6 +75,39 @@ def silverman_bandwidth(samples_log: np.ndarray) -> float:
     return float(bw)
 
 
+def compute_isj_bandwidth(values_log: np.ndarray) -> float:
+    """
+    Compute an ISJ / Sheather-Jones style bandwidth (in log10 units) using KDEpy FFTKDE.
+    Returns a float bandwidth.
+
+    - For very small samples -> fallback to Silverman for stability.
+    """
+    if FFTKDE is None:
+        raise ImportError(
+            "KDEpy is required to compute ISJ bandwidth. Install it with: pip install KDEpy"
+        )
+    values = np.asarray(values_log, dtype=float)
+    n = values.size
+    if n <= 8:
+        # ISJ tends to need a reasonable sample size; fallback to Silverman
+        return silverman_bandwidth(values)
+
+    # Fit KDEpy's FFTKDE with bw='ISJ' (it will compute an internal numeric bw)
+    kde = FFTKDE(bw="ISJ", kernel="gaussian")
+    kde.fit(values)
+    # calling evaluate forces computation and sets kde.bw in KDEpy implementations
+    try:
+        # use a small evaluation (default grid) just to force bandwidth computation
+        kde.evaluate(256)
+    except Exception:
+        # fallback to evaluate() without explicit points if above fails
+        kde.evaluate()
+    bw = getattr(kde, "bw", None)
+    if bw is None:
+        raise RuntimeError("KDEpy did not return a numeric bandwidth (kde.bw is None).")
+    return float(bw)
+
+
 def numpy_weighted_gaussian_kde_logspace(
     values_mm: np.ndarray,
     weights: np.ndarray,
@@ -86,13 +128,23 @@ def numpy_weighted_gaussian_kde_logspace(
         raise ValueError("weights must sum to > 0")
     w = w / w.sum()
 
+    if isinstance(bandwidth, str):
+        method = bandwidth.lower()
+        if method in ("isj"):
+            bandwidth = compute_isj_bandwidth(values_log)
+        else:
+           # try sensible conversion or error
+            try:
+                bandwidth = float(bandwidth)
+            except Exception:
+               raise ValueError(f"Unknown bandwidth method string: {bandwidth!r}")
+
     if bandwidth is None:
         bandwidth = silverman_bandwidth(values_log)
         if bandwidth <= 0:
             bandwidth = 0.1
     h = float(bandwidth)
     norm_factor = 1.0 / (np.sqrt(2.0 * np.pi) * h)
-
     n = values_log.size
     m = grid_log.size
 
@@ -111,6 +163,9 @@ def numpy_weighted_gaussian_kde_logspace(
         contrib = np.exp(-0.5 * (diff ** 2))
         dens += (contrib * w_block[None, :]).sum(axis=1)
     dens *= norm_factor
+
+    print(bandwidth)
+
     return dens
 
 
@@ -192,8 +247,8 @@ def plot_multiple_files(file_paths: List[str]) -> None:
     ax.legend(fontsize=8)
     ax.grid(which="both", linestyle=":", linewidth=0.5)
     fig.tight_layout()
-    fig.savefig(OUTPUT_KDE_PNG, dpi=300)
-    print(f"Saved KDE plot: {OUTPUT_KDE_PNG}")
+    fig.savefig(OUTPUT_PNG, dpi=300)
+    print(f"Saved plot: {OUTPUT_PNG}")
 
 
 # ----------------------------
