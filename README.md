@@ -15,3 +15,7 @@ source venv-plot/bin/activate
 python -m pip install -r requirements.txt
 
 python plotting.py file1.csv file2.csv file3.csv ...
+
+todo:
+using permutations f only 80% of the data to make the blurred images of the lines to see how good the data is (see the Book)
+also i currently dont really undetstand how he plotted the D10
