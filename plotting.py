@@ -1,15 +1,10 @@
 """
 Notes:
-
-Currently only a ChatGPT Slop. Will update the code in the future!
-
     - All plot / smoothing parameters are defined in the PARAMETERS section below
       (edit those constants directly if you want to change behavior).
     - The script intentionally avoids optional command-line parameters: you pass only the files
       as arguments.
 """
-
-from __future__ import annotations
 
 import sys
 import os
@@ -30,9 +25,6 @@ OUTPUT_TILE_PNG = "D10_tile_fraction.png"
 DEFAULT_BANDWIDTH = 0.035   # None -> Silverman rule-of-thumb will be used; otherwise use a number between 0 and 1
 GRID_POINTS = 800          # number of x points to evaluate KDE
 
-# Tile around D10: relative width (e.g. 0.10 = ±5% around D10 => total width = 10% of D10).
-TILE_REL_WIDTH = 0.10
-
 # Plot appearance
 FIGSIZE_KDE = (11, 6)
 FIGSIZE_TILE = (6.5, 5)
@@ -41,8 +33,6 @@ COLOR_CYCLE = None  # None -> use matplotlib default cycle
 # Memory safety: internal chunking for KDE computation (set None to auto-choose)
 KDE_SAMPLE_CHUNK = None
 
-# Units display (True: annotate D10 in µm)
-ANNOTATE_D10_IN_MICRONS = True
 
 # ----------------------------
 # Utility functions
@@ -87,7 +77,7 @@ def numpy_weighted_gaussian_kde_logspace(
     chunk_size: int | None = None,
 ) -> np.ndarray:
     """
-    Weighted Gaussian KDE in log10(size) space using numpy alone.
+    Weighted Gaussian KDE in log10(size) space
 
     Returns density per dex evaluated at x_grid_mm (same interpretation as KDE in log10-space).
     """
@@ -126,33 +116,6 @@ def numpy_weighted_gaussian_kde_logspace(
     dens *= norm_factor
     return dens
 
-
-def compute_percentile_from_kde(x_grid_mm: np.ndarray, density_per_dex: np.ndarray, q: float) -> float:
-    """
-    Compute the diameter (mm) corresponding to quantile q (0 < q < 1) from KDE density
-    defined on x_grid_mm (density is per dex). Integration done in log-space.
-    """
-    logx = np.log10(x_grid_mm)
-    # trapezoidal CDF over log-space
-    cdf = np.cumsum(0.5 * (density_per_dex[:-1] + density_per_dex[1:]) * np.diff(logx))
-    cdf = np.concatenate(([0.0], cdf))
-    if cdf[-1] <= 0:
-        return float("nan")
-    cdf = cdf / cdf[-1]
-    q = float(q)
-    if q <= 0:
-        return x_grid_mm[0]
-    if q >= 1:
-        return x_grid_mm[-1]
-    idx = np.searchsorted(cdf, q)
-    if idx == 0:
-        return x_grid_mm[0]
-    if idx >= len(cdf):
-        return x_grid_mm[-1]
-    # linear interpolate in log-space between idx-1 and idx
-    t = (q - cdf[idx - 1]) / (cdf[idx] - cdf[idx - 1])
-    logv = np.log10(x_grid_mm[idx - 1]) * (1 - t) + np.log10(x_grid_mm[idx]) * t
-    return 10 ** logv
 
 
 def interp_density_at_x(x_grid_mm: np.ndarray, density_per_dex: np.ndarray, x_mm: float) -> float:
@@ -220,50 +183,20 @@ def plot_multiple_files(file_paths: List[str]) -> None:
         )
 
         # plot: solid = number, dashed = volume
-        ax.plot(x_grid, dens_num, linestyle="-", linewidth=1.5, label=f"{basename} — number", color=color)
-        ax.plot(x_grid, dens_vol, linestyle="--", linewidth=1.5, label=f"{basename} — volume", color=color)
+        ax.plot(x_grid, dens_num, linestyle="--", linewidth=1.5, label=f"{basename} — number", color=color)
+        ax.plot(x_grid, dens_vol, linestyle="-", linewidth=1.5, label=f"{basename} — volume", color=color)
 
-        # compute D10 (volume-based)
-        D10_vol = compute_percentile_from_kde(x_grid, dens_vol, 0.10)
-        d10_marker_y = interp_density_at_x(x_grid, dens_vol, D10_vol)
-
-        # draw D10 marker & vertical line
-        ax.axvline(D10_vol, color=color, linestyle=":", linewidth=0.9, alpha=0.9)
-        ax.scatter([D10_vol], [d10_marker_y], marker="s", s=64, facecolors=color, edgecolors="k", zorder=6)
-
-        # annotate D10 (in µm if requested)
-        if ANNOTATE_D10_IN_MICRONS:
-            ann_text = f"D10 = {D10_vol*1000:.0f} µm"
-        else:
-            ann_text = f"D10 = {D10_vol:.4f} mm"
-        ax.annotate(
-            ann_text,
-            xy=(D10_vol, d10_marker_y),
-            xytext=(D10_vol * 1.12, d10_marker_y * 0.95),
-            fontsize=9,
-            color=color,
-            arrowprops=dict(arrowstyle="->", lw=0.7, color=color),
-        )
-
-        # compute tile fraction around D10 (relative)
-        tile_frac = fraction_volume_in_relative_tile(sizes_mm, volumes, D10_vol, TILE_REL_WIDTH)
-        d10_summary.append((basename, D10_vol, tile_frac))
 
     # format KDE axis
     ax.set_xscale("log")
     ax.set_xlabel("Short diameter (mm) — log scale")
     ax.set_ylabel("Fraction per decade (fraction / dex)")
-    ax.set_title("Particle size distributions — KDE in log10(size)\nSolid=line: number, dashed=line: volume")
+    ax.set_title("Particle size distributions")
     ax.legend(fontsize=8)
     ax.grid(which="both", linestyle=":", linewidth=0.5)
     fig.tight_layout()
     fig.savefig(OUTPUT_KDE_PNG, dpi=300)
     print(f"Saved KDE plot: {OUTPUT_KDE_PNG}")
-
-    # print D10 summary
-    print("\nD10 (volume) summary:")
-    for name, d10_mm, frac in d10_summary:
-        print(f" - {name}: D10 = {d10_mm*1000:.1f} µm, tile_frac (±{TILE_REL_WIDTH*50:.1f}%): {frac*100:.3f} %")
 
 
 # ----------------------------
