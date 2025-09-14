@@ -10,6 +10,8 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import matplotlib.lines as mlines
 
 try:
     from KDEpy import FFTKDE
@@ -28,7 +30,7 @@ OUTPUT_PNG = "plot.png"
 # None: Silverman rule-of-thumb
 # otherwise use a number between 0 and 1 (try for example 0.035)
 # i recommend using "ISJ" for acuracy with a big sample size. for smaller sample sizes it might be more helpful to use None (easier to see general trends)
-DEFAULT_BANDWIDTH = "ISJ"
+DEFAULT_BANDWIDTH = 0.035
 
 GRID_POINTS = 800          # number of x points to evaluate KDE
 
@@ -38,6 +40,17 @@ COLOR_CYCLE = None  # None -> use matplotlib default cycle
 
 # Memory safety: internal chunking for KDE computation (set None to auto-choose)
 KDE_SAMPLE_CHUNK = None
+
+
+# ----------------------------
+# SUBSAMPLED KDE (optional)
+# ----------------------------
+SHOW_SUBSAMPLED_KDE = True         # True = overlay subsampled KDEs
+SUBSAMPLE_FRACTION = 0.8           # fraction of particles to use per subsample
+SUBSAMPLED_COLOR_ALPHA = 0.10      # transparency for subsampled KDE lines
+SUBSAMPLED_REPEAT = 20             # how many times to randomly sample and plot
+
+
 
 
 # ----------------------------
@@ -164,8 +177,6 @@ def numpy_weighted_gaussian_kde_logspace(
         dens += (contrib * w_block[None, :]).sum(axis=1)
     dens *= norm_factor
 
-    print(bandwidth)
-
     return dens
 
 
@@ -189,10 +200,64 @@ def fraction_volume_in_relative_tile(sizes_mm: np.ndarray, volumes: np.ndarray, 
     return float(volumes[mask].sum() / total)
 
 
+def calculate_d10_raw_data(sizes_mm: np.ndarray, volumes: np.ndarray) -> float:
+    """
+    Calculate D10 directly from raw particle data (volume-weighted).
+    Returns the particle diameter (mm) below which 10% of the total volume lies.
+    """
+    if sizes_mm.size == 0 or volumes.sum() <= 0:
+        return np.nan
+
+    # sort by size
+    order = np.argsort(sizes_mm)
+    sizes_sorted = sizes_mm[order]
+    vol_sorted = volumes[order]
+
+    # cumulative volume fraction
+    cum_vol = np.cumsum(vol_sorted)
+    frac = cum_vol / cum_vol[-1]
+
+    # find where it crosses 0.10
+    return float(np.interp(0.10, frac, sizes_sorted))
+
+
+def calculate_d10_KDE(
+    sizes_mm: np.ndarray,
+    volumes: np.ndarray,
+    x_grid_mm: np.ndarray,
+    bandwidth: float | str | None = None,
+) -> float:
+    """
+    Calculate D10 from the KDE-smoothed volume distribution.
+    Uses numerical integration of the KDE curve (volume-weighted).
+    """
+    if sizes_mm.size == 0 or volumes.sum() <= 0:
+        return np.nan
+
+    # compute KDE for volume weights
+    dens_vol = numpy_weighted_gaussian_kde_logspace(
+        sizes_mm, volumes, x_grid_mm, bandwidth=bandwidth
+    )
+
+    # integrate density in log-space
+    log_x = np.log10(x_grid_mm)
+    dx = np.diff(log_x)
+    # trapezoidal integration
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (dens_vol[1:] + dens_vol[:-1]) * dx)])
+    cum /= cum[-1]  # normalize to [0,1]
+
+    # find D10 in mm
+    return float(np.interp(0.10, cum, x_grid_mm))
+
+
+
 # ----------------------------
 # Main plotting logic
 # ----------------------------
 def plot_multiple_files(file_paths: List[str]) -> None:
+    
+    print("Bigger differce in KDE vs raw indicate that the KDE might be not as acurate")
+    
     # set color cycle
     if COLOR_CYCLE is not None:
         plt.rcParams["axes.prop_cycle"] = plt.cycler(color=COLOR_CYCLE)
@@ -234,17 +299,72 @@ def plot_multiple_files(file_paths: List[str]) -> None:
             sizes_mm, vol_weights, x_grid, bandwidth=DEFAULT_BANDWIDTH, chunk_size=KDE_SAMPLE_CHUNK
         )
 
+        # SUBSAMPLE KDE's
+        if SHOW_SUBSAMPLED_KDE and sizes_mm.size > 1:
+            for r in range(SUBSAMPLED_REPEAT):
+                n_sub = max(2, int(len(sizes_mm) * SUBSAMPLE_FRACTION))
+                subsample_indices = np.random.choice(len(sizes_mm), n_sub, replace=False)
+                sizes_sub = sizes_mm[subsample_indices]
+                volumes_sub = volumes[subsample_indices]
+
+                # compute KDEs for subsample
+                dens_num_sub = numpy_weighted_gaussian_kde_logspace(
+                    sizes_sub, np.ones(n_sub), x_grid, bandwidth=DEFAULT_BANDWIDTH, chunk_size=KDE_SAMPLE_CHUNK
+                )
+                dens_vol_sub = numpy_weighted_gaussian_kde_logspace(
+                    sizes_sub, volumes_sub, x_grid, bandwidth=DEFAULT_BANDWIDTH, chunk_size=KDE_SAMPLE_CHUNK
+                )
+
+                # plot pale lines with same color as main line
+                ax.plot(x_grid, dens_num_sub, linestyle="--", linewidth=1.5, color=color, alpha=SUBSAMPLED_COLOR_ALPHA)
+                ax.plot(x_grid, dens_vol_sub, linestyle="-", linewidth=1.5, color=color, alpha=SUBSAMPLED_COLOR_ALPHA)
+
+        d10_raw = calculate_d10_raw_data(sizes_mm, volumes)
+        d10_kde = calculate_d10_KDE(sizes_mm, volumes, x_grid, bandwidth=DEFAULT_BANDWIDTH)
+        print(f"{basename}: D10 raw = {d10_raw:.3g} mm, D10 KDE = {d10_kde:.3g} mm")
+        percent_diff = 100.0 * (d10_kde - d10_raw) / d10_raw if d10_raw != 0 else np.nan
+        print(f"{basename}: % difference (KDE vs raw) = {percent_diff:.2f}%")
+
+        # plotting of the D10
+        offset_step = 0.1
+        offset = (i - (len(datasets) - 1) / 2) * offset_step
+        y_pos = 1.42 + offset
+
+        # plot raw D10 marker
+        ax.scatter(
+            [d10_raw], [y_pos],
+            color=color,
+            marker="o", edgecolor="black", zorder=5
+        )
+
+        # plot KDE D10 marker
+        ax.scatter(
+            [d10_kde], [y_pos],
+            color=color,
+            marker="x", s=80, zorder=5
+        )
+
         # plot: solid = number, dashed = volume
         ax.plot(x_grid, dens_num, linestyle="--", linewidth=1.5, label=f"{basename} — number", color=color)
         ax.plot(x_grid, dens_vol, linestyle="-", linewidth=1.5, label=f"{basename} — volume", color=color)
 
 
     # format KDE axis
+
+    raw_marker = mlines.Line2D([], [], color="black", marker="o", linestyle="None", label="D10 raw")
+    kde_marker = mlines.Line2D([], [], color="black", marker="x", linestyle="None", label="D10 KDE")
+    
+    handles, labels = ax.get_legend_handles_labels()
+    handles.extend([raw_marker, kde_marker])
+    labels.extend([raw_marker.get_label(), kde_marker.get_label()])
+    ax.legend(handles=handles, labels=labels, fontsize=8)
+
     ax.set_xscale("log")
-    ax.set_xlabel("Short diameter (mm) — log scale")
+    ax.xaxis.set_major_formatter(mticker.ScalarFormatter())
+    ax.ticklabel_format(axis="x", style="plain")
+    ax.set_xlabel("Short diameter (mm)")
     ax.set_ylabel("Fraction per decade (fraction / dex)")
     ax.set_title("Particle size distributions")
-    ax.legend(fontsize=8)
     ax.grid(which="both", linestyle=":", linewidth=0.5)
     fig.tight_layout()
     fig.savefig(OUTPUT_PNG, dpi=300)
